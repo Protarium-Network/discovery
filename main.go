@@ -1,11 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/xml"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+
+	_ "github.com/lib/pq"
 )
 
 type Endpoint struct {
@@ -22,6 +25,8 @@ type Result struct {
 	Endpoint Endpoint `xml:"endpoint"`
 }
 
+var db *sql.DB
+
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
@@ -29,20 +34,29 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func fetchConfigFromDB() (Endpoint, error) {
+	var ep Endpoint
+	query := `SELECT host, api_host, portal_host, n3ds_host FROM configurations LIMIT 1`
+
+	err := db.QueryRow(query).Scan(&ep.Host, &ep.ApiHost, &ep.PortalHost, &ep.N3DSHost)
+	if err != nil {
+		return ep, err
+	}
+	return ep, nil
+}
+
 func handleConfig(w http.ResponseWriter, r *http.Request) {
-	apiHost := getEnv("API_HOST", "")
-	portalHost := getEnv("PORTAL_HOST", "")
-	n3dsHost := getEnv("N3DS_HOST", "")
+	endpoint, err := fetchConfigFromDB()
+	if err != nil {
+		log.Printf("Error fetching configuration from database: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
 
 	result := Result{
 		HasError: 0,
 		Version:  1,
-		Endpoint: Endpoint{
-			Host:       apiHost,
-			ApiHost:    apiHost,
-			PortalHost: portalHost,
-			N3DSHost:   n3dsHost,
-		},
+		Endpoint: endpoint,
 	}
 
 	output, err := xml.MarshalIndent(result, "", "  ")
@@ -61,8 +75,21 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	httpPort := getEnv("HTTP_PORT", "3002")
+	dbConnStr := getEnv("DATABASE_URL", "postgres://user:password@localhost:5432/discovery?sslmode=disable")
 
+	var err error
+	db, err = sql.Open("postgres", dbConnStr)
+	if err != nil {
+		log.Fatalf("Database configuration error: %v", err)
+	}
+	defer db.Close()
+
+	if err = db.Ping(); err != nil {
+		log.Fatalf("Failed to connect to PostgreSQL: %v", err)
+	}
+	log.Println("Successfully connected to PostgreSQL.")
+
+	httpPort := getEnv("HTTP_PORT", "3002")
 	http.HandleFunc("/", handleConfig)
 
 	addr := fmt.Sprintf(":%s", httpPort)
